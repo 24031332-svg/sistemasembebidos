@@ -1,0 +1,320 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import serial
+import serial.tools.list_ports
+import threading
+import time
+
+
+class InterfazControlESP32:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Control Térmico Cíclico - ESP32")
+        self.root.geometry("850x550")
+        self.root.resizable(False, False)
+        self.root.configure(bg="#212529")
+
+        # Variables de estado y comunicación
+        self.puerto_serie = None
+        self.hilo_lectura = None
+        self.leyendo = False
+
+        self.temp_actual = 25.0
+        self.temp_high = 60.0
+        self.temp_low = 20.0
+        self.estado_sistema = "DETENIDO"
+        self.sistema_activo = False
+        self.esp32_conectado = False
+
+        # Construir la interfaz gráfica
+        self._crear_estilos()
+        self._crear_layout()
+        self.actualizar_lista_puertos()
+
+        # Dibujar termómetro inicial
+        self.dibujar_termometro(self.temp_actual)
+
+    def _crear_estilos(self):
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
+        self.style.configure("TLabel", background="#212529", foreground="#ffffff", font=("Segoe UI", 10))
+        self.style.configure("Title.TLabel", font=("Segoe UI", 14, "bold"), foreground="#00d2d3")
+        self.style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"), foreground="#f8f9fa")
+
+    def _crear_layout(self):
+        # Frame Principal (Izquierda: Termómetro, Derecha: Panel de Control)
+        main_frame = tk.Frame(self.root, bg="#212529")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+
+        # ------------------- LADO IZQUIERDO: TERMÓMETRO VISUAL -------------------
+        left_frame = tk.Frame(main_frame, bg="#2b3035", bd=2, relief=tk.GROOVE)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=False, padx=(0, 10), ipadx=10, ipady=10)
+
+        lbl_term_title = ttk.Label(left_frame, text="Termómetro en Tiempo Real", style="Header.TLabel", background="#2b3035")
+        lbl_term_title.pack(pady=(10, 5))
+
+        # Canvas para dibujar el termómetro
+        self.canvas_term = tk.Canvas(left_frame, width=220, height=430, bg="#2b3035", highlightthickness=0)
+        self.canvas_term.pack()
+
+        # ------------------- LADO DERECHO: PANEL DE CONTROL Y PARÁMETROS -------------------
+        right_frame = tk.Frame(main_frame, bg="#2b3035", bd=2, relief=tk.GROOVE)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, ipadx=15, ipady=10)
+
+        # 1. Conexión Serial
+        lbl_conn = ttk.Label(right_frame, text="1. Conexión Serie ESP32", style="Title.TLabel", background="#2b3035")
+        lbl_conn.pack(anchor="w", pady=(5, 5))
+
+        frame_conn = tk.Frame(right_frame, bg="#2b3035")
+        frame_conn.pack(fill=tk.X, pady=5)
+
+        self.combo_puertos = ttk.Combobox(frame_conn, state="readonly", width=18)
+        self.combo_puertos.pack(side=tk.LEFT, padx=(0, 5))
+
+        btn_refresh = tk.Button(frame_conn, text="🔄", command=self.actualizar_lista_puertos, bg="#495057", fg="white", font=("Segoe UI", 9, "bold"), width=3)
+        btn_refresh.pack(side=tk.LEFT, padx=2)
+
+        self.btn_conectar = tk.Button(frame_conn, text="Conectar", command=self.toggle_conexion, bg="#0d6efd", fg="white", font=("Segoe UI", 9, "bold"), width=10)
+        self.btn_conectar.pack(side=tk.LEFT, padx=5)
+
+        # Indicador de estado de conexión
+        self.lbl_estado_conn = tk.Label(right_frame, text="● ESP32 Desconectado", fg="#dc3545", bg="#2b3035", font=("Segoe UI", 10, "bold"))
+        self.lbl_estado_conn.pack(anchor="w", pady=(0, 10))
+
+        ttk.Separator(right_frame, orient="horizontal").pack(fill=tk.X, pady=8)
+
+        # 2. Configuración de Parámetros (Rango Temp)
+        lbl_param = ttk.Label(right_frame, text="2. Configuración de Umbrales (°C)", style="Title.TLabel", background="#2b3035")
+        lbl_param.pack(anchor="w", pady=(5, 5))
+
+        frame_inputs = tk.Frame(right_frame, bg="#2b3035")
+        frame_inputs.pack(fill=tk.X, pady=5)
+
+        tk.Label(frame_inputs, text="Límite Superior (HIGH):", fg="white", bg="#2b3035", font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w", pady=4)
+        self.entry_high = tk.Entry(frame_inputs, width=8, font=("Segoe UI", 10, "bold"), justify="center")
+        self.entry_high.insert(0, "60.0")
+        self.entry_high.grid(row=0, column=1, padx=10, pady=4)
+
+        tk.Label(frame_inputs, text="Límite Inferior (LOW):", fg="white", bg="#2b3035", font=("Segoe UI", 10)).grid(row=1, column=0, sticky="w", pady=4)
+        self.entry_low = tk.Entry(frame_inputs, width=8, font=("Segoe UI", 10, "bold"), justify="center")
+        self.entry_low.insert(0, "20.0")
+        self.entry_low.grid(row=1, column=1, padx=10, pady=4)
+
+        self.btn_enviar_param = tk.Button(frame_inputs, text="Aplicar Parámetros", command=self.enviar_parametros, bg="#198754", fg="white", font=("Segoe UI", 9, "bold"), state="disabled")
+        self.btn_enviar_param.grid(row=0, column=2, rowspan=2, padx=10)
+
+        ttk.Separator(right_frame, orient="horizontal").pack(fill=tk.X, pady=8)
+
+        # 3. Control de Ciclo
+        lbl_ctrl = ttk.Label(right_frame, text="3. Control de Sistema", style="Title.TLabel", background="#2b3035")
+        lbl_ctrl.pack(anchor="w", pady=(5, 5))
+
+        frame_botones = tk.Frame(right_frame, bg="#2b3035")
+        frame_botones.pack(fill=tk.X, pady=5)
+
+        self.btn_iniciar = tk.Button(frame_botones, text="▶ INICIAR CICLO", command=self.iniciar_ciclo, bg="#0d6efd", fg="white", font=("Segoe UI", 11, "bold"), height=2, width=15, state="disabled")
+        self.btn_iniciar.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.btn_detener = tk.Button(frame_botones, text="⏹ DETENER TODO", command=self.detener_ciclo, bg="#dc3545", fg="white", font=("Segoe UI", 11, "bold"), height=2, width=15, state="disabled")
+        self.btn_detener.pack(side=tk.LEFT)
+
+        ttk.Separator(right_frame, orient="horizontal").pack(fill=tk.X, pady=10)
+
+        # 4. Monitor de Estado
+        frame_status = tk.Frame(right_frame, bg="#1e2225", bd=1, relief=tk.SOLID)
+        frame_status.pack(fill=tk.BOTH, expand=True, pady=5, ipadx=10, ipady=10)
+
+        tk.Label(frame_status, text="MONITOR DEL SISTEMA", fg="#888", bg="#1e2225", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=5)
+
+        self.lbl_temp_actual = tk.Label(frame_status, text="Temperatura: -- °C", fg="#ffffff", bg="#1e2225", font=("Segoe UI", 14, "bold"))
+        self.lbl_temp_actual.pack(anchor="w", padx=10, pady=2)
+
+        self.lbl_estado_act = tk.Label(frame_status, text="Estado: DETENIDO", fg="#ffc107", bg="#1e2225", font=("Segoe UI", 12, "bold"))
+        self.lbl_estado_act.pack(anchor="w", padx=10, pady=2)
+
+        self.lbl_rangos_act = tk.Label(frame_status, text="Rangos: Low 20.0°C | High 60.0°C", fg="#00d2d3", bg="#1e2225", font=("Segoe UI", 10))
+        self.lbl_rangos_act.pack(anchor="w", padx=10, pady=2)
+
+    # ------------------- DIBUJO Y ANIMACIÓN DEL TERMÓMETRO -------------------
+    def dibujar_termometro(self, temp):
+        canvas = self.canvas_term
+        canvas.delete("all")
+
+        # Configuración de geometría
+        cx = 100         # Centro horizontal del tubo
+        top_y = 40       # Extremo superior
+        bot_y = 330      # Extremo inferior del tubo
+        bulb_cy = 360    # Centro del bulbo
+        bulb_r = 28      # Radio del bulbo
+        tube_w = 20      # Ancho del tubo
+
+        # Rangos de escala gráfica
+        t_min, t_max = 0.0, 80.0
+        temp_clamped = max(t_min, min(t_max, temp))
+
+        # Cálculo dinámico de color: FRESCO/FRÍO (Azul) <--> CALIENTE (Rojo)
+        factor = (temp_clamped - t_min) / (t_max - t_min)
+        r = int(255 * factor)
+        b = int(255 * (1 - factor))
+        g = int(50 * (1 - abs(factor - 0.5) * 2))
+        color_mercurio = f"#{r:02x}{g:02x}{b:02x}"
+
+        # 1. Dibujar estructura exterior (Sombra y Tubo de Vidrio)
+        canvas.create_oval(cx - bulb_r - 2, bulb_cy - bulb_r - 2, cx + bulb_r + 2, bulb_cy + bulb_r + 2, fill="#1e2225", outline="#495057", width=2)
+        canvas.create_rectangle(cx - (tube_w / 2) - 2, top_y - 2, cx + (tube_w / 2) + 2, bot_y + 2, fill="#1e2225", outline="#495057", width=2)
+
+        # 2. Líneas de referencia para LOW y HIGH
+        y_high = bot_y - ((self.temp_high - t_min) / (t_max - t_min)) * (bot_y - top_y)
+        y_low = bot_y - ((self.temp_low - t_min) / (t_max - t_min)) * (bot_y - top_y)
+
+        # Marcas de límite superior e inferior
+        canvas.create_line(cx - 30, y_high, cx + 30, y_high, fill="#ff6b6b", width=2, dash=(4, 2))
+        canvas.create_text(cx + 60, y_high, text=f"HIGH\n{self.temp_high}°C", fill="#ff6b6b", font=("Segoe UI", 8, "bold"))
+
+        canvas.create_line(cx - 30, y_low, cx + 30, y_low, fill="#48dbfb", width=2, dash=(4, 2))
+        canvas.create_text(cx + 60, y_low, text=f"LOW\n{self.temp_low}°C", fill="#48dbfb", font=("Segoe UI", 8, "bold"))
+
+        # 3. Dibujar nivel de fluido interno (Mercurio/Líquido)
+        y_fluido = bot_y - ((temp_clamped - t_min) / (t_max - t_min)) * (bot_y - top_y)
+        canvas.create_oval(cx - bulb_r + 4, bulb_cy - bulb_r + 4, cx + bulb_r - 4, bulb_cy + bulb_r - 4, fill=color_mercurio, outline="")
+        canvas.create_rectangle(cx - (tube_w / 2) + 4, y_fluido, cx + (tube_w / 2) - 4, bot_y + 10, fill=color_mercurio, outline="")
+
+        # 4. Graduación lateral (Marcas de temperatura)
+        for t in range(0, 81, 10):
+            y_pos = bot_y - ((t - t_min) / (t_max - t_min)) * (bot_y - top_y)
+            canvas.create_line(cx - (tube_w / 2) - 2, y_pos, cx - (tube_w / 2) - 8, y_pos, fill="#888", width=1)
+            canvas.create_text(cx - 20, y_pos, text=str(t), fill="#aaa", font=("Segoe UI", 7))
+
+        # Texto con valor exacto dentro o bajo el bulbo
+        canvas.create_text(cx, bulb_cy, text=f"{temp:.1f}°", fill="white", font=("Segoe UI", 10, "bold"))
+
+    # ------------------- LÓGICA DE COMUNICACIÓN SERIE -------------------
+    def actualizar_lista_puertos(self):
+        puertos = serial.tools.list_ports.comports()
+        self.combo_puertos["values"] = [p.device for p in puertos]
+        if puertos:
+            self.combo_puertos.current(0)
+
+    def toggle_conexion(self):
+        if not self.esp32_conectado:
+            puerto = self.combo_puertos.get()
+            if not puerto:
+                messagebox.showwarning("Atención", "Por favor selecciona un puerto COM.")
+                return
+            try:
+                self.puerto_serie = serial.Serial(puerto, 115200, timeout=1)
+                time.sleep(1.5)  # Esperar reinicio de ESP32 al conectar
+                self.esp32_conectado = True
+                self.leyendo = True
+
+                self.lbl_estado_conn.config(text=f"● Conectado ({puerto})", fg="#20c997")
+                self.btn_conectar.config(text="Desconectar", bg="#6c757d")
+                self.btn_enviar_param.config(state="normal")
+                self.btn_iniciar.config(state="normal")
+                self.btn_detener.config(state="normal")
+
+                # Iniciar hilo secundario para no congelar la GUI
+                self.hilo_lectura = threading.Thread(target=self._leer_puerto_serie, daemon=True)
+                self.hilo_lectura.start()
+
+            except Exception as e:
+                messagebox.showerror("Error de Conexión", f"No se pudo abrir el puerto: {e}")
+        else:
+            self.desconectar()
+
+    def desconectar(self):
+        self.leyendo = False
+        if self.puerto_serie and self.puerto_serie.is_open:
+            self.puerto_serie.close()
+
+        self.esp32_conectado = False
+        self.lbl_estado_conn.config(text="● ESP32 Desconectado", fg="#dc3545")
+        self.btn_conectar.config(text="Conectar", bg="#0d6efd")
+        self.btn_enviar_param.config(state="disabled")
+        self.btn_iniciar.config(state="disabled")
+        self.btn_detener.config(state="disabled")
+
+    def _leer_puerto_serie(self):
+        while self.leyendo and self.puerto_serie and self.puerto_serie.is_open:
+            try:
+                linea = self.puerto_serie.readline().decode('utf-8', errors='ignore').strip()
+                if linea.startswith("DATA:"):
+                    # Formato recibido: DATA:tempActual,estado,tempHigh,tempLow,sistemaActivo
+                    datos = linea.replace("DATA:", "").split(",")
+                    if len(datos) == 5:
+                        temp = float(datos[0])
+                        estado = datos[1]
+                        high = float(datos[2])
+                        low = float(datos[3])
+                        activo = datos[4] == "1"
+
+                        # Actualizar la interfaz en el hilo principal
+                        self.root.after(0, self._actualizar_interfaz, temp, estado, high, low, activo)
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+    def _actualizar_interfaz(self, temp, estado, high, low, activo):
+        self.temp_actual = temp
+        self.estado_sistema = estado
+        self.temp_high = high
+        self.temp_low = low
+        self.sistema_activo = activo
+
+        # Actualizar etiquetas de texto
+        self.lbl_temp_actual.config(text=f"Temperatura: {temp:.2f} °C")
+        self.lbl_estado_act.config(text=f"Estado: {estado}")
+        self.lbl_rangos_act.config(text=f"Rangos: Low {low:.1f}°C | High {high:.1f}°C")
+
+        # Color según estado
+        if estado == "CALENTANDO":
+            self.lbl_estado_act.config(fg="#ff6b6b")
+        elif estado == "ENFRIANDO":
+            self.lbl_estado_act.config(fg="#48dbfb")
+        else:
+            self.lbl_estado_act.config(fg="#ffc107")
+
+        # Volver a renderizar termómetro
+        self.dibujar_termometro(temp)
+
+    # ------------------- COMANDOS HACIA EL ESP32 -------------------
+    def enviar_comando(self, cmd):
+        if self.puerto_serie and self.puerto_serie.is_open:
+            try:
+                self.puerto_serie.write(f"{cmd}\n".encode('utf-8'))
+            except Exception as e:
+                messagebox.showerror("Error", f"Error al enviar datos: {e}")
+
+    def enviar_parametros(self):
+        try:
+            h = float(self.entry_high.get())
+            l = float(self.entry_low.get())
+
+            if h <= l:
+                messagebox.showwarning("Parámetros Inválidos", "El límite HIGH debe ser mayor que el límite LOW.")
+                return
+
+            # Comando tipo "SET:60.0,20.0"
+            self.enviar_comando(f"SET:{h:.1f},{l:.1f}")
+            messagebox.showinfo("Éxito", "Parámetros enviados correctamente al ESP32.")
+        except ValueError:
+            messagebox.showerror("Error", "Ingresa valores numéricos válidos.")
+
+    def iniciar_ciclo(self):
+        self.enviar_comando("START")
+
+    def detener_ciclo(self):
+        self.enviar_comando("STOP")
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = InterfazControlESP32(root)
+
+    # Garantizar desconexión limpia al cerrar la ventana
+    def al_cerrar():
+        app.desconectar()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", al_cerrar)
+    root.mainloop()

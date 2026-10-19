@@ -1,0 +1,35 @@
+// Pines
+const int LED = 2;
+const int MOTOR = 4;
+
+const int BOTON_ON = 18;
+const int BOTON_OFF = 19;
+
+void setup() {
+  pinMode(LED, OUTPUT);
+  pinMode(MOTOR, OUTPUT);
+
+  pinMode(BOTON_ON, INPUT_PULLUP);
+  pinMode(BOTON_OFF, INPUT_PULLUP);
+
+  // Todo apagado al iniciar
+  digitalWrite(LED, LOW);
+  digitalWrite(MOTOR, LOW);
+}
+
+void loop() {
+
+  // Botón de encendido
+  if (digitalRead(BOTON_ON) == LOW) {
+    digitalWrite(LED, HIGH);
+    digitalWrite(MOTOR, HIGH);
+    delay(200); // Antirrebote
+  }
+
+  // Botón de apagado
+  if (digitalRead(BOTON_OFF) == LOW) {
+    digitalWrite(LED, LOW);
+    digitalWrite(MOTOR, LOW);
+    delay(200); // Antirrebote
+  }
+}

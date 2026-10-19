@@ -1,0 +1,176 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import serial
+import serial.tools.list_ports
+import threading
+import time
+
+class ServoApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Control de Servomotor - ESP32")
+        self.root.geometry("450x550")
+        self.root.resizable(False, False)
+
+        # Variables de comunicación
+        self.arduino = None
+        self.puerto_seleccionado = tk.StringVar()
+        self.conectado = False
+        self.hilo_lectura = None
+
+        # Variables de estado
+        self.angulo_actual = tk.IntVar(value=90)
+        self.estado_conexion = tk.StringVar(value="Desconectado")
+
+        self.crear_interfaz()
+
+    def crear_interfaz(self):
+        # Estilos
+        style = ttk.Style()
+        style.theme_use('clam')
+
+        # --- SECCIÓN 1: Conexión Serial ---
+        frame_conexion = ttk.LabelFrame(self.root, text=" Conexión ESP32 ", padding=10)
+        frame_conexion.pack(fill="x", padx=15, pady=10)
+
+        ttk.Label(frame_conexion, text="Puerto COM:").grid(row=0, column=0, padx=5, pady=5)
+        
+        self.combo_puertos = ttk.Combobox(frame_conexion, textvariable=self.puerto_seleccionado, state="readonly", width=12)
+        self.combo_puertos.grid(row=0, column=1, padx=5, pady=5)
+        
+        btn_actualizar = ttk.Button(frame_conexion, text="🔄", width=3, command=self.actualizar_puertos)
+        btn_actualizar.grid(row=0, column=2, padx=2)
+
+        self.btn_conectar = ttk.Button(frame_conexion, text="Conectar", command=self.toggle_conexion)
+        self.btn_conectar.grid(row=0, column=3, padx=5, pady=5)
+
+        # Indicador de Estado
+        self.lbl_conexion = tk.Label(frame_conexion, textvariable=self.estado_conexion, 
+                                     bg="#ff4d4d", fg="white", font=("Helvetica", 9, "bold"), padx=10, pady=2)
+        self.lbl_conexion.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(5, 0))
+
+        # --- SECCIÓN 2: Visualización de Grados ---
+        frame_visor = ttk.LabelFrame(self.root, text=" Estado del Servo ", padding=10)
+        frame_visor.pack(fill="x", padx=15, pady=10)
+
+        self.lbl_grados = ttk.Label(frame_visor, text="90°", font=("Helvetica", 36, "bold"))
+        self.lbl_grados.pack(pady=5)
+
+        # --- SECCIÓN 3: Barra Deslizante (Slider) ---
+        frame_control = ttk.LabelFrame(self.root, text=" Control de Ángulo ", padding=10)
+        frame_control.pack(fill="x", padx=15, pady=10)
+
+        # Barrita (Scale)
+        self.slider = ttk.Scale(frame_control, from_=0, to=180, orient="horizontal", 
+                                variable=self.angulo_actual, command=self.al_mover_slider)
+        self.slider.pack(fill="x", padx=10, pady=10)
+
+        # Etiquetas de límite
+        frame_limites = ttk.Frame(frame_control)
+        frame_limites.pack(fill="x", padx=10)
+        ttk.Label(frame_limites, text="0°").pack(side="left")
+        ttk.Label(frame_limites, text="180°").pack(side="right")
+
+        # --- SECCIÓN 4: Botones Rápidos ---
+        frame_botones = ttk.LabelFrame(self.root, text=" Accesos Rápidos ", padding=10)
+        frame_botones.pack(fill="x", padx=15, pady=10)
+
+        btn_0 = ttk.Button(frame_botones, text="0°", command=lambda: self.enviar_comando("0"))
+        btn_0.pack(side="left", expand=True, padx=5)
+
+        btn_90 = ttk.Button(frame_botones, text="90°", command=lambda: self.enviar_comando("90"))
+        btn_90.pack(side="left", expand=True, padx=5)
+
+        btn_180 = ttk.Button(frame_botones, text="180°", command=lambda: self.enviar_comando("180"))
+        btn_180.pack(side="left", expand=True, padx=5)
+
+        self.actualizar_puertos()
+
+    def actualizar_puertos(self):
+        puertos = [port.device for port in serial.tools.list_ports.comports()]
+        self.combo_puertos['values'] = puertos
+        if puertos:
+            self.combo_puertos.current(0)
+
+    def toggle_conexion(self):
+        if not self.conectado:
+            puerto = self.puerto_seleccionado.get()
+            if not puerto:
+                messagebox.showwarning("Atención", "Selecciona un puerto COM válido.")
+                return
+            try:
+                # Conectar a 115200 baudios (misma velocidad que en tu código de ESP32)
+                self.arduino = serial.Serial(puerto, 115200, timeout=1)
+                time.sleep(1) # Esperar estabilización de la conexión
+                self.conectado = True
+                self.btn_conectar.config(text="Desconectar")
+                self.estado_conexion.set("Conectado a " + puerto)
+                self.lbl_conexion.config(bg="#2ecc71") # Verde
+
+                # Iniciar hilo secundario para leer el puerto en segundo plano
+                self.hilo_lectura = threading.Thread(target=self.leer_puerto_serial, daemon=True)
+                self.hilo_lectura.start()
+
+            except Exception as e:
+                messagebox.showerror("Error de Conexión", f"No se pudo abrir el puerto:\n{e}")
+        else:
+            self.desconectar()
+
+    def desconectar(self):
+        self.conectado = False
+        if self.arduino and self.arduino.is_open:
+            self.arduino.close()
+        self.btn_conectar.config(text="Conectar")
+        self.estado_conexion.set("Desconectado")
+        self.lbl_conexion.config(bg="#ff4d4d") # Rojo
+
+    def al_mover_slider(self, val):
+        grados = int(float(val))
+        self.lbl_grados.config(text=f"{grados}°")
+        self.enviar_comando(str(grados))
+
+    def enviar_comando(self, comando):
+        if self.conectado and self.arduino and self.arduino.is_open:
+            try:
+                mensaje = f"{comando}\n"
+                self.arduino.write(mensaje.encode())
+            except Exception as e:
+                print(f"Error al enviar datos: {e}")
+
+    def leer_puerto_serial(self):
+        """Escucha lo que envía el ESP32 (cambios por botones o confirmación)."""
+        while self.conectado:
+            try:
+                if self.arduino and self.arduino.in_waiting > 0:
+                    linea = self.arduino.readline().decode('utf-8', errors='ignore').strip()
+                    
+                    if linea.startswith("ANGULO:"):
+                        grados = int(linea.split(":")[1])
+                        # Actualizar la interfaz gráfica desde el hilo principal
+                        self.root.after(0, self.actualizar_gui_desde_serial, grados)
+                    elif linea.startswith("SERVO_READY:"):
+                        grados = int(linea.split(":")[1])
+                        self.root.after(0, self.actualizar_gui_desde_serial, grados)
+
+            except Exception as e:
+                print(f"Error leyendo serial: {e}")
+                break
+            time.sleep(0.05)
+
+    def actualizar_gui_desde_serial(self, grados):
+        # Actualizar indicador y barra sin re-disparar el evento del slider
+        self.angulo_actual.set(grados)
+        self.lbl_grados.config(text=f"{grados}°")
+
+# --- Punto de Entrada ---
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ServoApp(root)
+    
+    # Asegurar cierre limpio al cerrar la ventana
+    def al_cerrar():
+        app.desconectar()
+        root.destroy()
+        
+    root.protocol("WM_DELETE_WINDOW", al_cerrar)
+    root.mainloop()

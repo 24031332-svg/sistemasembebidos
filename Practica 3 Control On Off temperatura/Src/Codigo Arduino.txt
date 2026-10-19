@@ -1,0 +1,178 @@
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// --- NUEVA ASIGNACIÓN DE PINES ---
+const int PIN_DS18B20 = 32; // Señal del sensor DS18B20
+const int PIN_RELE1   = 26; // Relé 1: Foco (Conectado en NC)
+const int PIN_RELE2   = 27; // Relé 2: Peltier + Ventilador (Conectado en NO)
+
+// Instancias para el sensor
+OneWire oneWire(PIN_DS18B20);
+DallasTemperature sensors(&oneWire);
+
+// Parámetros por defecto
+float tempHigh = 60.0;
+float tempLow  = 20.0;
+bool sistemaActivo = false;
+
+enum EstadoSistema {
+  CALENTANDO,
+  ENFRIANDO,
+  DETENIDO
+};
+
+EstadoSistema estadoActual = DETENIDO;
+
+unsigned long ultimoTiempoLectura = 0;
+const unsigned long INTERVALO_LECTURA = 1000; // Lectura cada 1 segundo
+
+// Control del Foco (Conectado en Normalmente Cerrado - NC)
+void controlarFoco(bool encender) {
+  if (encender) {
+    digitalWrite(PIN_RELE1, HIGH); // Relé Desenergizado = NC Cerrado (Pasa corriente al foco)
+  } else {
+    digitalWrite(PIN_RELE1, LOW);  // Relé Energizado = NC Abierto (Se apaga el foco)
+  }
+}
+
+// Control de Peltier y Ventilador (Conectado en Normalmente Abierto - NO)
+void controlarEnfriador(bool encender) {
+  if (encender) {
+    digitalWrite(PIN_RELE2, LOW);  // Relé Energizado = NO Cerrado (Pasa corriente al enfriador)
+  } else {
+    digitalWrite(PIN_RELE2, HIGH); // Relé Desenergizado = NO Abierto (Se apaga)
+  }
+}
+
+void apagarTodo() {
+  controlarFoco(false);
+  controlarEnfriador(false);
+  estadoActual = DETENIDO;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Configuración de pines de salida
+  pinMode(PIN_RELE1, OUTPUT);
+  pinMode(PIN_RELE2, OUTPUT);
+
+  // Estado seguro inicial: Todo Apagado al arrancar
+  apagarTodo();
+
+  sensors.begin();
+  Serial.println("ESP32_LISTO");
+}
+
+void loop() {
+  procesarComandosSerie();
+
+  if (millis() - ultimoTiempoLectura >= INTERVALO_LECTURA) {
+    ultimoTiempoLectura = millis();
+
+    sensors.requestTemperatures();
+    float tempActual = sensors.getTempCByIndex(0);
+
+    // Detección de error de lectura
+    if (tempActual == DEVICE_DISCONNECTED_C || tempActual < -50.0) {
+      Serial.println("ERROR: Sensor DS18B20 no detectado");
+      apagarTodo();
+      return;
+    }
+
+    // Reporte de telemetría hacia Python
+    Serial.print("DATA:");
+    Serial.print(tempActual, 2);
+    Serial.print(",");
+    Serial.print(obtenerNombreEstado(estadoActual));
+    Serial.print(",");
+    Serial.print(tempHigh, 1);
+    Serial.print(",");
+    Serial.print(tempLow, 1);
+    Serial.print(",");
+    Serial.println(sistemaActivo ? "1" : "0");
+
+    // Lógica de control
+    if (sistemaActivo) {
+      ejecutarControlTemperatura(tempActual);
+    } else {
+      apagarTodo();
+    }
+  }
+}
+
+void ejecutarControlTemperatura(float temp) {
+  switch (estadoActual) {
+    case DETENIDO:
+      // Inicia el primer ciclo según la temperatura del momento
+      if (temp < tempHigh) {
+        estadoActual = CALENTANDO;
+      } else {
+        estadoActual = ENFRIANDO;
+      }
+      break;
+
+    case CALENTANDO:
+      controlarFoco(true);
+      controlarEnfriador(false);
+
+      // Transición al alcanzar el valor alto (HIGH)
+      if (temp >= tempHigh) {
+        controlarFoco(false);
+        estadoActual = ENFRIANDO;
+      }
+      break;
+
+    case ENFRIANDO:
+      controlarFoco(false);
+      controlarEnfriador(true);
+
+      // Transición al alcanzar el valor bajo (LOW)
+      if (temp <= tempLow) {
+        controlarEnfriador(false);
+        estadoActual = CALENTANDO;
+      }
+      break;
+  }
+}
+
+String obtenerNombreEstado(EstadoSistema est) {
+  switch (est) {
+    case CALENTANDO: return "CALENTANDO";
+    case ENFRIANDO:  return "ENFRIANDO";
+    case DETENIDO:   return "DETENIDO";
+    default:         return "DESCONOCIDO";
+  }
+}
+
+void procesarComandosSerie() {
+  if (Serial.available() > 0) {
+    String comando = Serial.readStringUntil('\n');
+    comando.trim();
+
+    if (comando == "START") {
+      sistemaActivo = true;
+      Serial.println("OK: SISTEMA_INICIADO");
+
+    } else if (comando == "STOP") {
+      sistemaActivo = false;
+      apagarTodo();
+      Serial.println("OK: SISTEMA_DETENIDO");
+
+    } else if (comando.startsWith("SET:")) {
+      int posComa = comando.indexOf(',');
+      if (posComa > 0) {
+        float nuevoHigh = comando.substring(4, posComa).toFloat();
+        float nuevoLow  = comando.substring(posComa + 1).toFloat();
+
+        if (nuevoHigh > nuevoLow) {
+          tempHigh = nuevoHigh;
+          tempLow  = nuevoLow;
+          Serial.println("OK: PARAMETROS_ACTUALIZADOS");
+        } else {
+          Serial.println("ERROR: HIGH debe ser mayor que LOW");
+        }
+      }
+    }
+  }
+}

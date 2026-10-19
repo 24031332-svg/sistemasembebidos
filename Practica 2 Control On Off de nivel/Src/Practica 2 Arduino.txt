@@ -1,0 +1,177 @@
+#include <ArduinoJson.h>
+
+// ===== SENSOR ULTRASÓNICO =====
+const int TRIG_PIN = 12;
+const int ECHO_PIN = 13;
+
+// ===== BOMBAS =====
+const int BOMBA_LLENADO = 26;
+const int BOMBA_VACIADO = 27;
+
+// ===== BOTONES =====
+const int BTN_SELECT = 33;
+const int BTN_UP = 32;
+const int BTN_DOWN = 25;
+
+// ===== PARÁMETROS DEL RECIPIENTE =====
+const float DISTANCIA_VACIO = 13.0;
+const float DISTANCIA_LLENO = 2.0;
+const int CAPACIDAD_ML = 1000;
+
+// ===== PARÁMETROS DE NIVEL (Histeresis) =====
+int highLevel = 80;
+int lowLevel = 30;
+
+// ===== DATOS DE AGUA Y ESTADO =====
+int nivelAgua = 0;
+int mililitros = 0;
+bool llenando = true;
+
+// ===== SELECCIÓN Y BOTONES =====
+int selectedParameter = 0; // 0 = High Level, 1 = Low Level
+bool lastSelectState = HIGH;
+unsigned long lastUpTime = 0;
+unsigned long lastDownTime = 0;
+const unsigned long BUTTON_REPEAT = 250;
+
+// ===== TIEMPO DE SENSOR =====
+unsigned long tiempoUltimaLectura = 0;
+const unsigned long INTERVALO_SENSOR = 500;
+
+// ===== LECTURA ULTRASÓNICO =====
+float leerUltrasonico() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duracion = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duracion == 0) return -1;
+
+  return (duracion * 0.0343) / 2.0;
+}
+
+// ===== CÁLCULO DE NIVEL Y VOLUMEN =====
+void calcularNivel() {
+  float distancia = leerUltrasonico();
+  if (distancia < 0) return;
+
+  float porcentaje = ((DISTANCIA_VACIO - distancia) / (DISTANCIA_VACIO - DISTANCIA_LLENO)) * 100.0;
+  
+  if (porcentaje < 0) porcentaje = 0;
+  if (porcentaje > 100) porcentaje = 100;
+
+  nivelAgua = (int)porcentaje;
+  mililitros = (porcentaje / 100.0) * CAPACIDAD_ML;
+}
+
+// ===== CONTROL DE BOMBAS =====
+void controlarBombas() {
+  if (nivelAgua >= highLevel) {
+    llenando = false;
+  } else if (nivelAgua <= lowLevel) {
+    llenando = true;
+  }
+
+  if (llenando) {
+    digitalWrite(BOMBA_LLENADO, HIGH);
+    digitalWrite(BOMBA_VACIADO, LOW);
+  } else {
+    digitalWrite(BOMBA_LLENADO, LOW);
+    digitalWrite(BOMBA_VACIADO, HIGH);
+  }
+}
+
+// ===== LECTURA DE BOTONES FÍSICOS =====
+void leerBotonesFisicos() {
+  // Botón SELECT (conmutar parámetro seleccionado)
+  bool estadoSelect = digitalRead(BTN_SELECT);
+  if (lastSelectState == HIGH && estadoSelect == LOW) {
+    selectedParameter = !selectedParameter;
+    delay(50);
+  }
+  lastSelectState = estadoSelect;
+
+  // Botón UP (Incrementar)
+  if (digitalRead(BTN_UP) == LOW) {
+    if (millis() - lastUpTime >= BUTTON_REPEAT) {
+      lastUpTime = millis();
+      if (selectedParameter == 0) {
+        if (highLevel < 100) highLevel += 5;
+      } else {
+        if (lowLevel + 5 < highLevel) lowLevel += 5;
+      }
+    }
+  }
+
+  // Botón DOWN (Decrementar)
+  if (digitalRead(BTN_DOWN) == LOW) {
+    if (millis() - lastDownTime >= BUTTON_REPEAT) {
+      lastDownTime = millis();
+      if (selectedParameter == 0) {
+        if (highLevel - 5 > lowLevel) highLevel -= 5;
+      } else {
+        if (lowLevel > 0) lowLevel -= 5;
+      }
+    }
+  }
+}
+
+// ===== RECEPCIÓN DE COMANDOS VIRTUALES (PYTHON) =====
+void leerComandosSerial() {
+  if (Serial.available() > 0) {
+    String jsonInput = Serial.readStringUntil('\n');
+    StaticJsonDocument<200> doc;
+    DeserializationError error = deserializeJson(doc, jsonInput);
+
+    if (!error) {
+      if (doc.containsKey("highLevel")) highLevel = doc["highLevel"];
+      if (doc.containsKey("lowLevel")) lowLevel = doc["lowLevel"];
+    }
+  }
+}
+
+// ===== ENVÍO DE ESTADO A PYTHON =====
+void enviarEstadoSerial() {
+  StaticJsonDocument<200> doc;
+  doc["nivel"] = nivelAgua;
+  doc["ml"] = mililitros;
+  doc["high"] = highLevel;
+  doc["low"] = lowLevel;
+  doc["param_sel"] = selectedParameter;
+  doc["bomba_llenado"] = (digitalRead(BOMBA_LLENADO) == HIGH);
+  doc["bomba_vaciado"] = (digitalRead(BOMBA_VACIADO) == HIGH);
+
+  serializeJson(doc, Serial);
+  Serial.println();
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(BTN_SELECT, INPUT_PULLUP);
+  pinMode(BTN_UP, INPUT_PULLUP);
+  pinMode(BTN_DOWN, INPUT_PULLUP);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(BOMBA_LLENADO, OUTPUT);
+  pinMode(BOMBA_VACIADO, OUTPUT);
+
+  digitalWrite(BOMBA_LLENADO, LOW);
+  digitalWrite(BOMBA_VACIADO, LOW);
+}
+
+void loop() {
+  leerBotonesFisicos();
+  leerComandosSerial();
+
+  if (millis() - tiempoUltimaLectura >= INTERVALO_SENSOR) {
+    tiempoUltimaLectura = millis();
+    calcularNivel();
+    controlarBombas();
+    enviarEstadoSerial();
+  }
+}

@@ -1,0 +1,226 @@
+import customtkinter as ctk
+import serial
+import json
+import threading
+import time
+
+# ===== CONFIGURACIÓN SERIAL =====
+PUERTO_SERIAL = 'COM7'  # Cambia por tu puerto (ej: 'COM3' o '/dev/ttyUSB0')
+BAUDRATE = 115200
+
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
+
+class WaterControlApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Control de Nivel de Agua - ESP32")
+        self.geometry("920x620")
+
+        # Variables del sistema
+        self.nivel = 0
+        self.ml = 0
+        self.high = 80
+        self.low = 30
+        self.param_sel = 0 # 0 para H, 1 para L
+        self.bomba_llenado = False
+        self.bomba_vaciado = False
+        self.anim_offset = 0
+
+        self.user_editing = False  # Previene sobreescritura al arrastrar sliders
+
+        # Conexión Serial
+        self.ser = None
+        self.conectar_serial()
+
+        self.crear_interfaz()
+
+        # Hilo de lectura continua
+        self.running = True
+        self.thread = threading.Thread(target=self.leer_serial, daemon=True)
+        self.thread.start()
+
+        # Bucle de animación visual
+        self.actualizar_animacion()
+
+    def conectar_serial(self):
+        try:
+            self.ser = serial.Serial(PUERTO_SERIAL, BAUDRATE, timeout=1)
+        except Exception as e:
+            print(f"No se pudo conectar al puerto {PUERTO_SERIAL}: {e}")
+
+    def crear_interfaz(self):
+        self.grid_columnconfigure(0, weight=3)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        # Lienzo del Tanque Visual
+        self.frame_canvas = ctk.CTkFrame(self)
+        self.frame_canvas.grid(row=0, column=0, padx=15, pady=15, sticky="nsew")
+
+        self.canvas = ctk.CTkCanvas(self.frame_canvas, bg="#121212", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Panel de Control Lateral
+        self.frame_control = ctk.CTkFrame(self, corner_radius=10)
+        self.frame_control.grid(row=0, column=1, padx=15, pady=15, sticky="nsew")
+
+        ctk.CTkLabel(self.frame_control, text="Panel de Estado", font=("Arial", 18, "bold")).pack(pady=10)
+
+        self.lbl_nivel = ctk.CTkLabel(self.frame_control, text="Nivel: 0 %", font=("Arial", 14))
+        self.lbl_nivel.pack(pady=5)
+
+        self.lbl_volumen = ctk.CTkLabel(self.frame_control, text="Mililitros: 0 ml", font=("Arial", 14))
+        self.lbl_volumen.pack(pady=5)
+
+        self.lbl_estado = ctk.CTkLabel(self.frame_control, text="Estado: IDLE", font=("Arial", 14, "bold"))
+        self.lbl_estado.pack(pady=10)
+
+        self.lbl_seleccion = ctk.CTkLabel(self.frame_control, text="Sel. Físico: High (H)", font=("Arial", 11, "italic"), text_color="#aaaaaa")
+        self.lbl_seleccion.pack(pady=2)
+
+        # Controles Umbral Alto (H)
+        ctk.CTkLabel(self.frame_control, text="Umbral Alto (H %):", font=("Arial", 12)).pack(pady=(15, 2))
+        self.slider_high = ctk.CTkSlider(self.frame_control, from_=5, to=100, number_of_steps=19, command=self.on_high_change)
+        self.slider_high.bind("<Button-1>", lambda e: setattr(self, 'user_editing', True))
+        self.slider_high.bind("<ButtonRelease-1>", lambda e: setattr(self, 'user_editing', False))
+        self.slider_high.set(self.high)
+        self.slider_high.pack(pady=5)
+
+        self.lbl_high_val = ctk.CTkLabel(self.frame_control, text=f"H: {self.high}%", font=("Arial", 12, "bold"))
+        self.lbl_high_val.pack()
+
+        # Controles Umbral Bajo (L)
+        ctk.CTkLabel(self.frame_control, text="Umbral Bajo (L %):", font=("Arial", 12)).pack(pady=(15, 2))
+        self.slider_low = ctk.CTkSlider(self.frame_control, from_=0, to=95, number_of_steps=19, command=self.on_low_change)
+        self.slider_low.bind("<Button-1>", lambda e: setattr(self, 'user_editing', True))
+        self.slider_low.bind("<ButtonRelease-1>", lambda e: setattr(self, 'user_editing', False))
+        self.slider_low.set(self.low)
+        self.slider_low.pack(pady=5)
+
+        self.lbl_low_val = ctk.CTkLabel(self.frame_control, text=f"L: {self.low}%", font=("Arial", 12, "bold"))
+        self.lbl_low_val.pack()
+
+    def on_high_change(self, val):
+        val = int(val)
+        if val <= self.low:
+            val = self.low + 5
+            self.slider_high.set(val)
+        self.high = val
+        self.lbl_high_val.configure(text=f"H: {self.high}%")
+        self.enviar_comandos()
+
+    def on_low_change(self, val):
+        val = int(val)
+        if val >= self.high:
+            val = self.high - 5
+            self.slider_low.set(val)
+        self.low = val
+        self.lbl_low_val.configure(text=f"L: {self.low}%")
+        self.enviar_comandos()
+
+    def enviar_comandos(self):
+        if self.ser and self.ser.is_open:
+            data = json.dumps({"highLevel": self.high, "lowLevel": self.low}) + "\n"
+            self.ser.write(data.encode('utf-8'))
+
+    def leer_serial(self):
+        while self.running:
+            if self.ser and self.ser.is_open:
+                try:
+                    line = self.ser.readline().decode('utf-8').strip()
+                    if line:
+                        payload = json.loads(line)
+                        self.nivel = payload.get("nivel", self.nivel)
+                        self.ml = payload.get("ml", self.ml)
+                        self.param_sel = payload.get("param_sel", self.param_sel)
+                        self.bomba_llenado = payload.get("bomba_llenado", False)
+                        self.bomba_vaciado = payload.get("bomba_vaciado", False)
+
+                        # Si el usuario no está arrastrando el slider, sincronizar desde ESP32
+                        if not self.user_editing:
+                            self.high = payload.get("high", self.high)
+                            self.low = payload.get("low", self.low)
+                            self.slider_high.set(self.high)
+                            self.slider_low.set(self.low)
+                            self.lbl_high_val.configure(text=f"H: {self.high}%")
+                            self.lbl_low_val.configure(text=f"L: {self.low}%")
+
+                except Exception:
+                    pass
+            time.sleep(0.05)
+
+    def actualizar_animacion(self):
+        self.canvas.delete("all")
+
+        # Configuración Tanque 1 (Principal)
+        t1_x1, t1_y1, t1_x2, t1_y2 = 100, 100, 280, 440
+        self.canvas.create_rectangle(t1_x1, t1_y1, t1_x2, t1_y2, outline="white", width=4)
+        self.canvas.create_text((t1_x1 + t1_x2) / 2, t1_y1 - 25, text="Depósito Principal", fill="white", font=("Arial", 14, "bold"))
+
+        # Agua Tanque 1
+        h_max = t1_y2 - t1_y1
+        h_agua_1 = (self.nivel / 100.0) * h_max
+        y_agua_1 = t1_y2 - h_agua_1
+        if h_agua_1 > 0:
+            self.canvas.create_rectangle(t1_x1 + 4, y_agua_1, t1_x2 - 4, t1_y2 - 2, fill="#00aaff", outline="")
+
+        # Marcadores de umbrales H y L en Tanque 1
+        y_h = t1_y2 - (self.high / 100.0) * h_max
+        y_l = t1_y2 - (self.low / 100.0) * h_max
+
+        self.canvas.create_line(t1_x1 - 15, y_h, t1_x2 + 15, y_h, fill="#ff4444", dash=(4, 4), width=2)
+        self.canvas.create_text(t1_x1 - 35, y_h, text=f"H:{self.high}%", fill="#ff4444", font=("Arial", 10, "bold"))
+
+        self.canvas.create_line(t1_x1 - 15, y_l, t1_x2 + 15, y_l, fill="#ffbb00", dash=(4, 4), width=2)
+        self.canvas.create_text(t1_x1 - 35, y_l, text=f"L:{self.low}%", fill="#ffbb00", font=("Arial", 10, "bold"))
+
+        # Configuración Tanque 2 (Reserva)
+        t2_x1, t2_y1, t2_x2, t2_y2 = 380, 100, 560, 440
+        self.canvas.create_rectangle(t2_x1, t2_y1, t2_x2, t2_y2, outline="white", width=4)
+        self.canvas.create_text((t2_x1 + t2_x2) / 2, t2_y1 - 25, text="Tanque Reserva", fill="white", font=("Arial", 14, "bold"))
+
+        # Agua Tanque 2
+        h_agua_2 = ((100 - self.nivel) / 100.0) * h_max
+        y_agua_2 = t2_y2 - h_agua_2
+        if h_agua_2 > 0:
+            self.canvas.create_rectangle(t2_x1 + 4, y_agua_2, t2_x2 - 4, t2_y2 - 2, fill="#0077cc", outline="")
+
+        # Efecto visual de Flujo de Agua (sin mangueras)
+        self.anim_offset = (self.anim_offset + 2) % 20
+
+        if self.bomba_llenado:
+            # Chorro cayendo en Depósito Principal
+            x_stream = (t1_x1 + t1_x2) / 2
+            self.canvas.create_line(x_stream, t1_y1, x_stream, y_agua_1 if y_agua_1 > t1_y1 else t1_y2 - 5,
+                                    fill="#00e5ff", width=6, dash=(8, 8), dashoffset=-self.anim_offset)
+            self.lbl_estado.configure(text="Estado: LLENANDO", text_color="#00ff77")
+
+        elif self.bomba_vaciado:
+            # Chorro cayendo en Tanque Reserva
+            x_stream = (t2_x1 + t2_x2) / 2
+            self.canvas.create_line(x_stream, t2_y1, x_stream, y_agua_2 if y_agua_2 > t2_y1 else t2_y2 - 5,
+                                    fill="#00e5ff", width=6, dash=(8, 8), dashoffset=-self.anim_offset)
+            self.lbl_estado.configure(text="Estado: VACIANDO", text_color="#ff5555")
+
+        # Indicador de cuál parámetro se modifica con botones físicos
+        txt_sel = "Sel. Físico: High (H)" if self.param_sel == 0 else "Sel. Físico: Low (L)"
+        self.lbl_seleccion.configure(text=txt_sel)
+
+        # Actualizar etiquetas
+        self.lbl_nivel.configure(text=f"Nivel: {self.nivel} %")
+        self.lbl_volumen.configure(text=f"Mililitros: {self.ml} ml")
+
+        self.after(50, self.actualizar_animacion)
+
+    def on_closing(self):
+        self.running = False
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+        self.destroy()
+
+if __name__ == "__main__":
+    app = WaterControlApp()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
+    app.mainloop()

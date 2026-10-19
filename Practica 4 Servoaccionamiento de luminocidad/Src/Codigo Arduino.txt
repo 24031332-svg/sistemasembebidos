@@ -1,0 +1,103 @@
+#include <ESP32Servo.h>
+
+// --- Configuración de Pines ---
+const int PIN_SERVO     = 12; // Pin de señal del Servomotor
+const int PIN_BTN_SUBIR = 14; // Pulsador para AUMENTAR grados
+const int PIN_BTN_BAJAR = 32; // Pulsador para DISMINUIR grados
+
+// --- Objetos y Variables Globales ---
+Servo miServo;
+
+int anguloActual = 90;        // Ángulo inicial (posición central)
+const int ANGULO_MIN = 0;     // Límite mínimo
+const int ANGULO_MAX = 180;   // Límite máximo
+const int PASO_GRADOS = 5;    // Cuántos grados avanza/retrocede por pulsación
+
+// Guardar estados de los botones para evitar lecturas duplicadas
+bool estadoAnteriorSubir = HIGH;
+bool estadoAnteriorBajar = HIGH;
+
+void setup() {
+  // Configuración de frecuencia y ancho de pulso estándar para ESP32Servo
+  ESP32PWM::allocateTimer(0);
+  miServo.setPeriodHertz(50); // Servo analógico estándar (50 Hz)
+  miServo.attach(PIN_SERVO, 500, 2400); // Modula el ancho de pulso para 0-180°
+  
+  // Posición inicial
+  miServo.write(anguloActual);
+
+  // Configurar pines con resistencia PULLUP interna del ESP32
+  // (El botón va conectado directamente entre el GPIO y GND)
+  pinMode(PIN_BTN_SUBIR, INPUT_PULLUP);
+  pinMode(PIN_BTN_BAJAR, INPUT_PULLUP);
+
+  // Comunicación Serial (115200 es la velocidad recomendada en ESP32)
+  Serial.begin(115200);
+  Serial.setTimeout(50);
+
+  // Mensaje inicial de confirmación
+  Serial.print("SERVO_READY:");
+  Serial.println(anguloActual);
+}
+
+void loop() {
+  // 1. Lectura de Pulsadores
+  leerPulsadores();
+
+  // 2. Lectura de Comandos Seriales (Python / USB)
+  leerComandosSerial();
+}
+
+void leerPulsadores() {
+  bool lecturaSubir = digitalRead(PIN_BTN_SUBIR);
+  bool lecturaBajar = digitalRead(PIN_BTN_BAJAR);
+
+  // Botón SUBIR presionado (Pin 14)
+  if (lecturaSubir == LOW && estadoAnteriorSubir == HIGH) {
+    modificarAngulo(anguloActual + PASO_GRADOS);
+    delay(150); // Evita rebotes mecánicos
+  }
+
+  // Botón BAJAR presionado (Pin 32)
+  if (lecturaBajar == LOW && estadoAnteriorBajar == HIGH) {
+    modificarAngulo(anguloActual - PASO_GRADOS);
+    delay(150);
+  }
+
+  estadoAnteriorSubir = lecturaSubir;
+  estadoAnteriorBajar = lecturaBajar;
+}
+
+void leerComandosSerial() {
+  if (Serial.available() > 0) {
+    String comando = Serial.readStringUntil('\n');
+    comando.trim();
+
+    if (comando.length() > 0) {
+      if (comando.startsWith("+")) {
+        int delta = comando.substring(1).toInt();
+        modificarAngulo(anguloActual + delta);
+      } 
+      else if (comando.startsWith("-")) {
+        int delta = comando.substring(1).toInt();
+        modificarAngulo(anguloActual - delta);
+      } 
+      else {
+        int nuevoAngulo = comando.toInt();
+        modificarAngulo(nuevoAngulo);
+      }
+    }
+  }
+}
+
+void modificarAngulo(int nuevoAngulo) {
+  // Restringir el ángulo entre 0 y 180
+  anguloActual = constrain(nuevoAngulo, ANGULO_MIN, ANGULO_MAX);
+  
+  // Mover el servo
+  miServo.write(anguloActual);
+  
+  // Notificar por Serial
+  Serial.print("ANGULO:");
+  Serial.println(anguloActual);
+}
